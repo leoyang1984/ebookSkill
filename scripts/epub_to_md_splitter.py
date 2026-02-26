@@ -27,7 +27,7 @@ def slugify(text):
     text = re.sub(r'[-\s]+', '_', text)
     return text
 
-def convert_epub_to_md(epub_path, project_dir_name=None):
+def convert_epub_to_md(epub_path, output_base_dir=None, project_dir_name=None):
     """
     Creates a directory for the epub and runs pandoc to extract
     images and convert the epub to markdown in that directory.
@@ -37,8 +37,10 @@ def convert_epub_to_md(epub_path, project_dir_name=None):
         logging.error(f"File {epub_path} does not exist.")
         sys.exit(1)
         
-    base_dir = epub_file.parent
-    # Use slugified name for the project directory to ensure cross-platform compatibility
+    # Determine the parent directory for the project
+    base_dir = Path(output_base_dir) if output_base_dir else epub_file.parent
+    
+    # Use slugified name for the project directory
     folder_name = project_dir_name if project_dir_name else slugify(epub_file.stem)
     project_dir = base_dir / folder_name
     
@@ -64,6 +66,8 @@ def convert_epub_to_md(epub_path, project_dir_name=None):
     ]
     
     try:
+        # We must change cwd to the project directory so that --extract-media=.
+        # puts the images folder inside it correctly.
         subprocess.run(cmd, cwd=str(project_dir), check=True, capture_output=True)
         logging.info("Pandoc conversion successful.")
     except subprocess.CalledProcessError as e:
@@ -106,7 +110,7 @@ def split_markdown(project_dir, full_md_path, min_lines=200, max_lines=300, clea
     sub_header_pattern = re.compile(r'^(###|####|#####)\s+(.+)$')
 
     chapters = []
-    current_chapter_title_prefix = "000_Intro"
+    current_chapter_title_prefix = "000_intro"
     current_chapter_lines = []
     
     # Group into Chapters
@@ -119,7 +123,7 @@ def split_markdown(project_dir, full_md_path, min_lines=200, max_lines=300, clea
             raw_title = match.group(2).strip()
             safe_title = slugify(raw_title)
             if not safe_title:
-                safe_title = "Chapter"
+                safe_title = "chapter"
                 
             current_chapter_title_prefix = safe_title
             current_chapter_lines = [line]
@@ -182,10 +186,11 @@ def save_chunk(directory, counter, title, lines):
 def main():
     parser = argparse.ArgumentParser(description="Convert EPUB to Markdown and split into AI-friendly chunks.")
     parser.add_argument("epub", help="Path to the source EPUB file.")
+    parser.add_argument("--out", help="Path to the output directory (default: same folder as EPUB).")
+    parser.add_argument("--name", help="Custom folder name for the project (slugified title by default).")
     parser.add_argument("--min", type=int, default=200, help="Minimum lines per chunk (default: 200).")
     parser.add_argument("--max", type=int, default=300, help="Maximum lines per chunk (default: 300).")
     parser.add_argument("--no-clean", action="store_false", dest="clean", help="Do not strip residual HTML tags.")
-    parser.add_argument("--name", help="Custom folder name for the output.")
     
     args = parser.parse_args()
 
@@ -193,7 +198,7 @@ def main():
         logging.error("Pandoc is not installed or not in your PATH. Please install it (e.g., 'brew install pandoc').")
         sys.exit(1)
         
-    project_dir, full_md_path = convert_epub_to_md(args.epub, args.name)
+    project_dir, full_md_path = convert_epub_to_md(args.epub, args.out, args.name)
     split_markdown(project_dir, full_md_path, args.min, args.max, args.clean)
 
 if __name__ == "__main__":
