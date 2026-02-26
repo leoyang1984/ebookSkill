@@ -3,35 +3,55 @@ import os
 import subprocess
 import shutil
 import re
+import argparse
+import logging
 from pathlib import Path
 
-def convert_epub_to_md(epub_path):
+# Setup basic logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+def check_pandoc():
+    """Checks if pandoc is installed and available in the PATH."""
+    try:
+        subprocess.run(["pandoc", "--version"], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+def slugify(text):
+    """
+    Simplifies text to be used in a safe filename or directory name.
+    """
+    text = text.lower()
+    text = re.sub(r'[^\w\s-]', '', text).strip()
+    text = re.sub(r'[-\s]+', '_', text)
+    return text
+
+def convert_epub_to_md(epub_path, project_dir_name=None):
     """
     Creates a directory for the epub and runs pandoc to extract
     images and convert the epub to markdown in that directory.
-    Returns the path to the newly created directory and the generated markdown file.
     """
-    # 1. Prepare directory
     epub_file = Path(epub_path)
     if not epub_file.exists():
-        print(f"Error: File {epub_path} does not exist.")
+        logging.error(f"File {epub_path} does not exist.")
         sys.exit(1)
         
     base_dir = epub_file.parent
-    project_name = epub_file.stem
-    project_dir = base_dir / project_name
+    # Use slugified name for the project directory to ensure cross-platform compatibility
+    folder_name = project_dir_name if project_dir_name else slugify(epub_file.stem)
+    project_dir = base_dir / folder_name
     
     if project_dir.exists():
-        print(f"Warning: Directory {project_dir} already exists. Might overwrite contents.")
+        logging.warning(f"Directory {project_dir} already exists. Overwriting content in 'full_content.md'.")
     else:
         project_dir.mkdir(parents=True, exist_ok=True)
     
-    # Target full markdown file
     full_md_path = project_dir / "full_content.md"
     
-    print(f"Running pandoc conversion for: {epub_file.name}...")
-    # 2. Run Pandoc command
-    # pandoc input.epub -o output.md --extract-media=images -t gfm
+    logging.info(f"Converting: {epub_file.name} to {project_dir.name}/full_content.md...")
+    
+    # Run Pandoc command: convert to GFM, extract media, prevent line wrapping
     cmd = [
         "pandoc", 
         str(epub_file.absolute()), 
@@ -40,72 +60,64 @@ def convert_epub_to_md(epub_path):
         "--extract-media=.", 
         "-t", 
         "gfm",
-        "--wrap=none" # Prevent pandoc from hard-wrapping text to 80 chars
+        "--wrap=none" 
     ]
     
-    # Run the command from within the new project directory
-    # so that paths to extracted media are inherently relative
     try:
-        subprocess.run(cmd, cwd=str(project_dir), check=True)
-        print("Pandoc conversion successful. Extracting media and creating full_content.md.")
+        subprocess.run(cmd, cwd=str(project_dir), check=True, capture_output=True)
+        logging.info("Pandoc conversion successful.")
     except subprocess.CalledProcessError as e:
-        print(f"Pandoc conversion failed: {e}")
+        logging.error(f"Pandoc conversion failed: {e.stderr.decode()}")
         sys.exit(1)
         
     return project_dir, full_md_path
 
-def split_markdown(project_dir, full_md_path):
+def clean_content(content):
     """
-    Reads the full markdown file, cleans up unnecessary HTML tags (spans, divs, links),
-    and splits it into multiple smaller markdown files
-    in the project directory, respecting chapters and line limits (200-300 lines).
+    Removes residual HTML tags often left by EPUB-to-Markdown conversion.
+    """
+    # Remove spans, divs, and a tags but keep their inner content
+    tags_to_strip = [r'<span[^>]*>', r'</span>', r'<div[^>]*>', r'</div>', r'<a href="[^"]*"[^>]*>', r'</a>']
+    for tag in tags_to_strip:
+        content = re.sub(tag, '', content, flags=re.IGNORECASE)
+    
+    # Optionally remove empty lines or repetitive whitespace here if needed
+    return content
+
+def split_markdown(project_dir, full_md_path, min_lines=200, max_lines=300, clean=True):
+    """
+    Splits a large markdown file into smaller, manageable chunks.
     """
     if not full_md_path.exists():
-        print(f"Error: {full_md_path} not found for splitting.")
+        logging.error(f"{full_md_path} not found.")
         return
 
+    logging.info(f"Splitting content with limits: {min_lines}-{max_lines} lines per chunk.")
+
     with open(full_md_path, 'r', encoding='utf-8') as f:
-        # Read the entire file as a single string to perform global regex substitutions
         content = f.read()
         
-    # Clean up EPUB leftover HTML tags
-    # Remove <span ...> and </span>
-    content = re.sub(r'<span[^>]*>', '', content)
-    content = re.sub(r'</span>', '', content)
-    
-    # Remove <div ...> and </div>
-    content = re.sub(r'<div[^>]*>', '', content)
-    content = re.sub(r'</div>', '', content)
-    
-    # Remove <a href="..."> and </a>
-    content = re.sub(r'<a href="[^"]*"[^>]*>', '', content)
-    content = re.sub(r'</a>', '', content)
-    
-    # Pandoc sometimes escapes underscores and brackets, optionally clean those too
-    
-    # Split back into lines, keeping the newline character at the end of each line
+    if clean:
+        content = clean_content(content)
+        
     lines = content.splitlines(keepends=True)
         
-    # Regex to catch top level headers for Chapter breaks
     chapter_pattern = re.compile(r'^(#|##)\s+(.+)$')
-    # Regex for lower level subheaders
     sub_header_pattern = re.compile(r'^(###|####|#####)\s+(.+)$')
 
     chapters = []
-    current_chapter_title_prefix = "00_Intro"
+    current_chapter_title_prefix = "000_Intro"
     current_chapter_lines = []
     
-    # 1. Group into coarse Chapters first
-    for i, line in enumerate(lines):
+    # Group into Chapters
+    for line in lines:
         match = chapter_pattern.match(line)
         if match:
-            # We found a new chapter
             if current_chapter_lines:
                 chapters.append((current_chapter_title_prefix, current_chapter_lines))
             
-            # Clean up the title for the filename
             raw_title = match.group(2).strip()
-            safe_title = re.sub(r'[^\w\s-]', '', raw_title).strip().replace(' ', '_')
+            safe_title = slugify(raw_title)
             if not safe_title:
                 safe_title = "Chapter"
                 
@@ -114,84 +126,75 @@ def split_markdown(project_dir, full_md_path):
         else:
             current_chapter_lines.append(line)
             
-    # Add the last chapter
     if current_chapter_lines:
         chapters.append((current_chapter_title_prefix, current_chapter_lines))
         
     file_counter = 1
     
-    # 2. Process each chapter and apply line count rules
-    for current_chapter_title_prefix, current_chapter_lines in chapters:
-        total_lines = len(current_chapter_lines)
+    for title_prefix, chapter_lines in chapters:
+        total_lines = len(chapter_lines)
         
-        if total_lines <= 200:
-            # Short enough, save as is
-            save_chunk(project_dir, file_counter, current_chapter_title_prefix, current_chapter_lines)
+        if total_lines <= min_lines:
+            save_chunk(project_dir, file_counter, title_prefix, chapter_lines)
             file_counter += 1
         else:
-            # Chunk it up
             current_chunk = []
             part_number = 1
             
-            for line in current_chapter_lines:
+            for line in chapter_lines:
                 current_chunk.append(line)
                 chunk_len = len(current_chunk)
                 
-                # Rule 2 & 3: If > 200 lines, look for boundaries between 200-300 lines
-                if chunk_len >= 200:
-                    # Is this a good breaking point? (Blank line or a subheader)
+                if chunk_len >= min_lines:
                     is_blank = line.strip() == ""
                     is_subheader = bool(sub_header_pattern.match(line))
                     
-                    if (is_blank or is_subheader) or chunk_len >= 300:
-                        # Time to break
-                        # If the current line is a subheader, we should probably start the NEW chunk with it,
-                        # so pop it from current and put it back in the next.
-                        if is_subheader and chunk_len < 300:
+                    if (is_blank or is_subheader) or chunk_len >= max_lines:
+                        # Logic to keep subheaders at the START of a new chunk
+                        if is_subheader and chunk_len < max_lines:
                              popped_header = current_chunk.pop()
-                             
-                             title = f"{current_chapter_title_prefix}_Part_{part_number}"
+                             title = f"{title_prefix}_part_{part_number}"
                              save_chunk(project_dir, file_counter, title, current_chunk)
-                             
                              current_chunk = [popped_header]
                         else:
-                             title = f"{current_chapter_title_prefix}_Part_{part_number}"
+                             title = f"{title_prefix}_part_{part_number}"
                              save_chunk(project_dir, file_counter, title, current_chunk)
                              current_chunk = []
                              
                         part_number += 1
                         file_counter += 1
                         
-            # Save any remaining lines
-            if current_chunk:
-                # If the remaining chunk is just whitespace, ignore it
-                if any(l.strip() for l in current_chunk):
-                     title = f"{current_chapter_title_prefix}_Part_{part_number}"
-                     save_chunk(project_dir, file_counter, title, current_chunk)
-                     file_counter += 1
+            if current_chunk and any(l.strip() for l in current_chunk):
+                title = f"{title_prefix}_part_{part_number}"
+                save_chunk(project_dir, file_counter, title, current_chunk)
+                file_counter += 1
 
-    print(f"Splitting complete. Created {file_counter - 1} sections in {project_dir.name}/")
+    logging.info(f"Done! Created {file_counter - 1} files in '{project_dir.name}/'.")
     
 def save_chunk(directory, counter, title, lines):
-    """
-    Helper to save a list of lines to a numbered markdown file.
-    """
-    # Ensure title is safe and not too long
-    safe_title = title[:50]
-    filename = f"{counter:02d}_{safe_title}.md"
+    # Using 03d to support books with hundreds of sections
+    safe_title = title[:60]
+    filename = f"{counter:03d}_{safe_title}.md"
     filepath = directory / filename
-    
     with open(filepath, 'w', encoding='utf-8') as f:
         f.writelines(lines)
         
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python epub_to_md_splitter.py <path_to_epub_file>")
+    parser = argparse.ArgumentParser(description="Convert EPUB to Markdown and split into AI-friendly chunks.")
+    parser.add_argument("epub", help="Path to the source EPUB file.")
+    parser.add_argument("--min", type=int, default=200, help="Minimum lines per chunk (default: 200).")
+    parser.add_argument("--max", type=int, default=300, help="Maximum lines per chunk (default: 300).")
+    parser.add_argument("--no-clean", action="store_false", dest="clean", help="Do not strip residual HTML tags.")
+    parser.add_argument("--name", help="Custom folder name for the output.")
+    
+    args = parser.parse_args()
+
+    if not check_pandoc():
+        logging.error("Pandoc is not installed or not in your PATH. Please install it (e.g., 'brew install pandoc').")
         sys.exit(1)
         
-    epub_file = sys.argv[1]
-    project_dir, full_md_path = convert_epub_to_md(epub_file)
-    split_markdown(project_dir, full_md_path)
+    project_dir, full_md_path = convert_epub_to_md(args.epub, args.name)
+    split_markdown(project_dir, full_md_path, args.min, args.max, args.clean)
 
 if __name__ == "__main__":
     main()
