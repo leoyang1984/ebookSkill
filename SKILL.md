@@ -27,7 +27,7 @@ ebookSkill/
 1. Place your target `.epub` file in any directory.
 2. Run the provided Python script, passing the path to your EPUB file as the argument:
    ```bash
-   python /Volumes/外部硬盘/agent-skills/2026_Career_Data_Warehouse/ebookSkill/scripts/epub_to_md_splitter.py /path/to/your/input.epub
+   python scripts/epub_to_md_splitter.py /path/to/your/input.epub
    ```
 
 #### What Happens
@@ -56,7 +56,7 @@ If you want the AI agent (e.g., Claude Code) to translate the split markdown fil
 If you find that some markdown files (such as the generated `full_content.md` or other manually edited files) still contain residual HTML tags from the EPUB (like `<span>` or `<div>`), you can use the standalone cleanup script:
 
 ```bash
-python /Volumes/外部硬盘/agent-skills/2026_Career_Data_Warehouse/ebookSkill/scripts/clean_markdown.py /path/to/your/markdown_file.md
+python scripts/clean_markdown.py /path/to/your/markdown_file.md
 ```
 This script will overwrite the original markdown file with a cleaned version.
 
